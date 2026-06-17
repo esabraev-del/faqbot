@@ -1,128 +1,133 @@
 #!/usr/bin/env python3
 """
 Telegram FAQ Bot — КазНПУ Астана / КазНПУ Астана
-Двуязычный бот (рус/каз) с inline-кнопками и FAQ из JSON
+Двуязычный бот (рус/каз) с FAQ из Google Sheets
 """
 
-import json
-import logging
 import os
+import logging
+import urllib.request
+import json
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
 )
 
-# ─── Настройки ─────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8897221236:AAF33EvuJJdSyKmosn2XfC-206eEeDQ9KW8")
-FAQ_FILE = os.path.join(os.path.dirname(__file__), "faq.json")
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
+# ID вашей Google Таблицы
+SPREADSHEET_ID = "1oS5ggbGTzoCDZbyGQpg04eVBnb4ZX6TSU0x5aoUc53g"
+# Название листа
+SHEET_NAME = "FAQ"
+
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── Загрузка FAQ ──────────────────────────────────────────────────────────
+# ─── Загрузка FAQ из Google Sheets ───────────────────────────────────────
 def load_faq() -> dict:
-    with open(FAQ_FILE, encoding="utf-8") as f:
-        return json.load(f)
+    url = (
+        f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
+        f"/gviz/tq?tqx=out:json&sheet={SHEET_NAME}"
+    )
+    with urllib.request.urlopen(url) as resp:
+        raw = resp.read().decode("utf-8")
+    # Google возвращает не чистый JSON, убираем обёртку
+    raw = raw[raw.index("{"):raw.rindex("}") + 1]
+    data = json.loads(raw)
+
+    rows = data["table"]["rows"]
+    categories = {}
+    cat_order = []
+
+    for row in rows:
+        cells = row.get("c", [])
+        def val(i):
+            if i < len(cells) and cells[i] and cells[i].get("v") is not None:
+                return str(cells[i]["v"]).strip()
+            return ""
+        cat_ru, cat_kz, cat_id, q_ru, q_kz, a_ru, a_kz = (val(i) for i in range(7))
+        if not cat_id or not q_ru:
+            continue
+        if cat_id not in categories:
+            categories[cat_id] = {"id": cat_id, "ru": cat_ru, "kz": cat_kz, "questions": []}
+            cat_order.append(cat_id)
+        q_id = f"{cat_id}_{len(categories[cat_id]['questions'])}"
+        categories[cat_id]["questions"].append({
+            "id": q_id, "ru_q": q_ru, "kz_q": q_kz, "ru_a": a_ru, "kz_a": a_kz
+        })
+
+    return {"categories": [categories[k] for k in cat_order]}
 
 # ─── Тексты интерфейса ────────────────────────────────────────────────────
 UI = {
     "ru": {
-        "welcome": (
-            "👋 Добро пожаловать в бот КазНПУ Астана!\n\n"
-            "Выберите язык / Тілді таңдаңыз:"
-        ),
+        "welcome": "👋 Добро пожаловать в бот КазНПУ Астана!\n\nВыберите язык / Тілді таңдаңыз:",
         "choose_category": "📂 Выберите раздел:",
         "choose_question": "❓ Выберите вопрос:",
         "back_categories": "◀️ Назад к разделам",
         "back_questions": "◀️ Назад к вопросам",
         "back_main": "🏠 Главное меню",
         "lang_button": "🇰🇿 Қазақша",
-        "help": (
-            "ℹ️ Этот бот отвечает на часто задаваемые вопросы об университете.\n\n"
-            "Используйте /start для возврата в главное меню."
-        ),
+        "help": "ℹ️ Бот отвечает на вопросы об университете.\n\nИспользуйте /start для возврата в меню.",
+        "no_data": "⚠️ Данные ещё не добавлены. Заполните Google Таблицу.",
     },
     "kz": {
-        "welcome": (
-            "👋 КазНПУ Астана ботына қош келдіңіз!\n\n"
-            "Тілді таңдаңыз / Выберите язык:"
-        ),
+        "welcome": "👋 ҚазҰПУ Астана ботына қош келдіңіз!\n\nТілді таңдаңыз / Выберите язык:",
         "choose_category": "📂 Бөлімді таңдаңыз:",
         "choose_question": "❓ Сұрақты таңдаңыз:",
         "back_categories": "◀️ Бөлімдерге оралу",
         "back_questions": "◀️ Сұрақтарға оралу",
         "back_main": "🏠 Басты мәзір",
         "lang_button": "🇷🇺 Русский",
-        "help": (
-            "ℹ️ Бұл бот университет туралы жиі қойылатын сұрақтарға жауап береді.\n\n"
-            "Басты мәзірге оралу үшін /start пайдаланыңыз."
-        ),
+        "help": "ℹ️ Бот университет туралы сұрақтарға жауап береді.\n\n/start — басты мәзір.",
+        "no_data": "⚠️ Деректер әлі қосылмаған. Google Кестені толтырыңыз.",
     },
 }
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────
-def get_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
-    return context.user_data.get("lang", "ru")
+def get_lang(context): return context.user_data.get("lang", "ru")
 
-def lang_key(lang: str, key_ru: str, key_kz: str) -> str:
-    return key_kz if lang == "kz" else key_ru
+def keyboard_language():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+        InlineKeyboardButton("🇰🇿 Қазақша", callback_data="lang:kz"),
+    ]])
 
-# ─── Клавиатуры ───────────────────────────────────────────────────────────
-def keyboard_language() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
-            InlineKeyboardButton("🇰🇿 Қазақша", callback_data="lang:kz"),
-        ]
-    ])
-
-def keyboard_categories(lang: str) -> InlineKeyboardMarkup:
+def keyboard_categories(lang):
     faq = load_faq()
-    buttons = []
-    for cat in faq["categories"]:
-        label = cat["ru"] if lang == "ru" else cat["kz"]
-        buttons.append([InlineKeyboardButton(label, callback_data=f"cat:{cat['id']}")])
-    # Кнопка смены языка
+    if not faq["categories"]:
+        return None
+    buttons = [[InlineKeyboardButton(
+        cat["ru"] if lang == "ru" else cat["kz"], callback_data=f"cat:{cat['id']}"
+    )] for cat in faq["categories"]]
     buttons.append([InlineKeyboardButton(UI[lang]["lang_button"], callback_data="switch_lang")])
     return InlineKeyboardMarkup(buttons)
 
-def keyboard_questions(cat_id: str, lang: str) -> InlineKeyboardMarkup:
+def keyboard_questions(cat_id, lang):
     faq = load_faq()
-    cat = next(c for c in faq["categories"] if c["id"] == cat_id)
+    cat = next((c for c in faq["categories"] if c["id"] == cat_id), None)
+    if not cat:
+        return None
     buttons = []
     for q in cat["questions"]:
         label = q["ru_q"] if lang == "ru" else q["kz_q"]
-        # Обрезаем длинные вопросы для кнопки
-        if len(label) > 60:
-            label = label[:57] + "..."
+        if len(label) > 60: label = label[:57] + "..."
         buttons.append([InlineKeyboardButton(label, callback_data=f"q:{q['id']}")])
     buttons.append([InlineKeyboardButton(UI[lang]["back_categories"], callback_data="back_categories")])
     return InlineKeyboardMarkup(buttons)
 
-def keyboard_answer(cat_id: str, lang: str) -> InlineKeyboardMarkup:
+def keyboard_answer(cat_id, lang):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(UI[lang]["back_questions"], callback_data=f"cat:{cat_id}")],
         [InlineKeyboardButton(UI[lang]["back_main"], callback_data="back_main")],
     ])
 
-# ─── Хэндлеры ─────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start — показывает выбор языка"""
     context.user_data.pop("lang", None)
-    await update.message.reply_text(
-        UI["ru"]["welcome"],
-        reply_markup=keyboard_language(),
-    )
+    await update.message.reply_text(UI["ru"]["welcome"], reply_markup=keyboard_language())
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang(context)
-    await update.message.reply_text(UI[lang]["help"])
+    await update.message.reply_text(UI[get_lang(context)]["help"])
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -130,38 +135,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     lang = get_lang(context)
 
-    # Выбор языка
     if data.startswith("lang:"):
         lang = data.split(":")[1]
         context.user_data["lang"] = lang
-        await query.edit_message_text(
-            UI[lang]["choose_category"],
-            reply_markup=keyboard_categories(lang),
-        )
+        kb = keyboard_categories(lang)
+        if kb:
+            await query.edit_message_text(UI[lang]["choose_category"], reply_markup=kb)
+        else:
+            await query.edit_message_text(UI[lang]["no_data"])
 
-    # Смена языка
     elif data == "switch_lang":
         lang = "kz" if lang == "ru" else "ru"
         context.user_data["lang"] = lang
-        await query.edit_message_text(
-            UI[lang]["choose_category"],
-            reply_markup=keyboard_categories(lang),
-        )
+        kb = keyboard_categories(lang)
+        if kb:
+            await query.edit_message_text(UI[lang]["choose_category"], reply_markup=kb)
+        else:
+            await query.edit_message_text(UI[lang]["no_data"])
 
-    # Выбор категории
     elif data.startswith("cat:"):
         cat_id = data.split(":", 1)[1]
         context.user_data["current_cat"] = cat_id
-        await query.edit_message_text(
-            UI[lang]["choose_question"],
-            reply_markup=keyboard_questions(cat_id, lang),
-        )
+        kb = keyboard_questions(cat_id, lang)
+        if kb:
+            await query.edit_message_text(UI[lang]["choose_question"], reply_markup=kb)
 
-    # Выбор вопроса
     elif data.startswith("q:"):
         q_id = data.split(":", 1)[1]
         faq = load_faq()
-        # Найти вопрос и его категорию
         cat_id = context.user_data.get("current_cat", "")
         question = None
         for cat in faq["categories"]:
@@ -175,29 +176,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         q_text = question["ru_q"] if lang == "ru" else question["kz_q"]
         a_text = question["ru_a"] if lang == "ru" else question["kz_a"]
-        text = f"❓ *{q_text}*\n\n{a_text}"
         await query.edit_message_text(
-            text,
+            f"❓ *{q_text}*\n\n{a_text}",
             parse_mode="Markdown",
             reply_markup=keyboard_answer(cat_id, lang),
         )
 
-    # Назад к категориям
     elif data == "back_categories":
-        await query.edit_message_text(
-            UI[lang]["choose_category"],
-            reply_markup=keyboard_categories(lang),
-        )
+        kb = keyboard_categories(lang)
+        if kb:
+            await query.edit_message_text(UI[lang]["choose_category"], reply_markup=kb)
 
-    # Главное меню
     elif data == "back_main":
         context.user_data.pop("lang", None)
-        await query.edit_message_text(
-            UI["ru"]["welcome"],
-            reply_markup=keyboard_language(),
-        )
+        await query.edit_message_text(UI["ru"]["welcome"], reply_markup=keyboard_language())
 
-# ─── Запуск ───────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
